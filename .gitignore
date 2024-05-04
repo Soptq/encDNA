@@ -1,0 +1,13 @@
+.idea
+
+data/*.vcf.gz
+data/reference_1000g.vcf
+data/samples_1000g.tsv
+data/sample_maps/*.map
+data/train1/**/*.npy
+data/train2/**/*.npy
+data/val/**/*.npy
+data/gen_map_df.pkl
+data/metadata.pkl
+
+.DS_Store
