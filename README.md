@@ -65,6 +65,6 @@ Hyper-parameters:
 
 Configurations are default as mentioned in the `config.py`. There are in total 370 base models for ensembles. According to downstream tasks, this can be adjusted by changing `WINDOW_SIZE_CM` and other related configurations.
 
-| Dataset                 | Accuracy | Time (execute) |
-|-------------------------|----------|----------------|
-| 1000genomes (Augmented) | 0.9810   | 350 min/it     |
+| Dataset                 | Accuracy | Time (execute) | Time (non FHE) |
+|-------------------------|----------|----------------|----------------|
+| 1000genomes (Augmented) | 0.9810   | 350 min/it     | 0.164 s/it     |
