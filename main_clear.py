@@ -7,7 +7,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from xgboost import XGBClassifier
 
 from config import *
-from preprocessing import get_data
+from preprocessing import get_data, get_data_v2
 
 from tqdm import tqdm
 
@@ -43,7 +43,7 @@ def slide_window(B, S, y=None):
 if __name__ == '__main__':
     print("Training without FHE")
     print("Getting data...")
-    data, meta = get_data()
+    data, meta = get_data_v2()
     (X_t1, y_t1), (X_t2, y_t2), (X_v, y_v) = data
 
     print("Constructing model...")
@@ -95,7 +95,6 @@ if __name__ == '__main__':
         base_args += ((models[-1], X_p[:, X_p.shape[1] - (M_ + rem):]),)
 
         log_iter = tqdm(base_args, total=n_windows, bar_format='{l_bar}{bar:40}{r_bar}{bar:-40b}', position=0, leave=True)
-
         B = np.array([b[0].predict_proba(b[1]) for b in log_iter])
         B = np.swapaxes(B, 0, 1)
 

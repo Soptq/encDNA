@@ -4,8 +4,13 @@ import os
 from collections import namedtuple
 import scipy.interpolate
 
-from utils import read_vcf, read_genetic_map
+import csv
+import itertools
+import operator
+import gzip
+import pickle
 
+from utils import read_vcf, read_genetic_map
 
 Person = namedtuple('Person', 'maternal paternal name')
 
@@ -25,7 +30,7 @@ def get_chm_info(genetic_map, variants_pos, chm):
     chm_length_morgans = max(genetic_chm["pos_cm"]) / 100.0
 
     # get snp info - snps in the vcf file and their cm values.
-    # then compute per position probability of being a breapoint.
+    # then compute per position probability of being a breakpoint.
     # requires some interpolation and finding closest positions.
     """
     # 1: Minimum in a sorted array approach and implemented inside admix().
@@ -184,6 +189,7 @@ def write_output(root, dataset):
     # create npy files.
     snps = np.stack(snps)
     np.save(root + "/mat_vcf_2d.npy", snps)
+    print(root + "/mat_vcf_2d.npy")
 
     # create map files.
     anc = np.stack(anc)
@@ -350,11 +356,10 @@ class LAIDataset:
         assert (type(split) == str)
         print("Simulating using split: ", split)
 
-            # get generations for each sample to be simulated
+        # get generations for each sample to be simulated
         if gen == None:
             gens = np.random.randint(2, 100, num_samples)
             print("Simulating random generations...")
-
         else:
             gens = gen * np.ones((num_samples), dtype=int)
             print("Simulating generation: ", gen)
@@ -402,3 +407,229 @@ class LAIDataset:
             return simulated_samples
         else:
             return
+
+
+class AncestryDataset:
+    def __init__(self, samples_path, mapping_path, r_admixed, build_split, build_gens, test_samples_path, test_mapping_path, data_dir):
+        print("Reading vcf file...")
+        vcf_data = read_vcf(samples_path)
+        self.pos_snps = vcf_data["variants/POS"].copy()
+        self.num_snps = vcf_data["calldata/GT"].shape[0]
+        self.ref_snps = vcf_data["variants/REF"].copy().astype(str)
+        self.alt_snps = vcf_data["variants/ALT"][:, 0].copy().astype(str)
+        print(self.pos_snps, self.num_snps, self.ref_snps, self.alt_snps)
+
+        self.call_data = vcf_data["calldata/GT"]
+        self.vcf_samples = vcf_data["samples"]
+
+        print("Getting sample map info")
+        sample_map_data = pd.read_csv(mapping_path, dtype="object")
+        sample_map_data.columns = ["sample", "population", "population_code"]
+
+        ancestry_map = {}
+        for i, pop in enumerate(sample_map_data["population"]):
+            ancestry_map[pop] = sample_map_data["population_code"][i]
+        sample_map_data["population_code"] = sample_map_data["population"].apply(ancestry_map.get)
+        sample_map_data["sample_weight"] = [1.0 / len(sample_map_data)] * len(sample_map_data)
+
+        self.pop_to_num, self.sample_map_data = ancestry_map, sample_map_data
+        self.num_to_pop = {v: k for k, v in self.pop_to_num.items()}
+
+        try:
+            map_samples = np.array(list(self.sample_map_data["sample"]))
+
+            sorter = np.argsort(self.vcf_samples)
+            indices = sorter[np.searchsorted(self.vcf_samples, map_samples, sorter=sorter)]
+            self.sample_map_data["index_in_reference"] = indices
+
+        except:
+            raise Exception("sample not found in vcf file!!!")
+
+        # self.founders
+        print("Building founders...")
+        self.sample_map_data["founders"] = build_founders(self.sample_map_data, self.call_data, self.num_snps)
+        self.sample_map_data.drop(['index_in_reference'], axis=1, inplace=True)
+
+        print("Splitting sample map...")
+        # splits is a dict with some proportions, splits keys must be str
+        assert (type(build_split) == dict)
+        self.splits = build_split
+        split_names, prop = zip(*self.splits.items())
+
+        # normalize
+        prop = np.array(prop) / np.sum(prop)
+
+        # split founders randomly within each ancestry
+        split_df = self.split_sample_map(ratios=prop, split_names=split_names)
+        self.sample_map_data = self.sample_map_data.merge(split_df, on=["sample", "population"])
+        self.include_all(from_split="train1", in_split="train2")
+
+        for split in build_split:
+            split_file = os.path.join(data_dir, "sample_maps", split + ".map")
+            self.return_split(split)[["sample", "population"]].to_csv(split_file, sep="\t", header=False, index=False)
+
+        # get num_outs
+        num_outs = {}
+        min_splits = {"train1": 2400, "train2": 600}
+        for split in build_split:
+            total_sim = max(len(self.return_split(split)) * r_admixed, min_splits[split])
+            num_outs[split] = int(total_sim / len(build_gens))
+
+        print("Running Simulation...")
+        for split in build_split:
+            split_path = os.path.join(data_dir, split)
+            if not os.path.exists(split_path):
+                os.makedirs(split_path)
+            for gen in build_gens:
+                # general purpose simulator: can simulate any generations, either n of gen g or
+                # just random n samples from gen 2 to 100.
+                simulate_out_dir = os.path.join(split_path, "gen_" + str(gen))
+                assert (type(split) == str)
+                print("Simulating using split: ", split)
+
+                # get generations for each sample to be simulated
+                if gen == None:
+                    gens = np.random.randint(2, 100, num_outs[split])
+                    print("Simulating random generations...")
+                else:
+                    gens = gen * np.ones((num_outs[split]), dtype=int)
+                    print("Simulating generation: ", gen)
+
+                # corner case
+                if gen == 0:
+                    simulated_samples = self.sample_map_data[self.sample_map_data["split"] == split][
+                        "founders"].tolist()
+                    if simulate_out_dir is not None:
+                        print("Writing simulation output to: ", simulate_out_dir)
+                        write_output(simulate_out_dir, simulated_samples)
+                    continue
+
+                # get the exact founder data based on split
+                founders = self.sample_map_data[self.sample_map_data["split"] == split]["founders"].tolist()
+                founders_weight = self.sample_map_data[self.sample_map_data["split"] == split][
+                    "sample_weight"].to_numpy()
+                founders_weight = list(founders_weight / founders_weight.sum())  # renormalize to 1
+                if len(founders) == 0:
+                    raise Exception("Split does not exist!!!")
+
+                # run simulation
+                print("Generating {} admixed samples".format(num_outs[split]))
+                simulated_samples = []
+                for i in range(num_outs[split]):
+                    # create an admixed Person
+                    maternal = admix(founders, founders_weight, gens[i], None, self.num_snps,
+                                     0.75)
+                    paternal = admix(founders, founders_weight, gens[i], None, self.num_snps,
+                                     0.75)
+                    name = "admixed" + str(int(np.random.rand() * 1e6))
+
+                    adm = Person(maternal, paternal, name)
+                    simulated_samples.append(adm)
+
+                # write outputs
+                if simulate_out_dir is not None:
+                    print("Writing simulation output to: ", simulate_out_dir)
+                    write_output(simulate_out_dir, simulated_samples)
+
+        # print(num_outs)
+        print("Reading test vcf...")
+        vcf_test_data = read_vcf(test_samples_path)
+        self.test_call_data = vcf_test_data["calldata/GT"]
+        self.vcf_test_samples = vcf_test_data["samples"]
+
+        print("Getting test sample map info")
+        with gzip.open(test_mapping_path, "rb") as mapping_file:
+            mappings = pickle.load(mapping_file)
+        test_sample_map = {}
+        for name, anc_1, anc_2 in mappings:
+            test_sample_map[name] = [anc_1, anc_2]
+
+        test_founders = []
+        test_samples = self.test_call_data.transpose(1, 2, 0)
+        for i in range(len(test_samples)):
+            maternal, paternal = {}, {}
+            maternal["snps"] = test_samples[i, 0, :].astype(np.uint8)
+            paternal["snps"] = test_samples[i, 1, :].astype(np.uint8)
+            maternal["anc"] = test_sample_map[self.vcf_test_samples[i]][0].astype(np.uint8)
+            paternal["anc"] = test_sample_map[self.vcf_test_samples[i]][1].astype(np.uint8)
+            p = Person(maternal, paternal, self.vcf_test_samples[i])
+            test_founders.append(p)
+
+        test_samples_dir = os.path.join(data_dir, "val", "gen_0")
+        if test_samples_dir is not None:
+            print("Writing test samples to: ", test_samples_dir)
+            write_output(test_samples_dir, test_founders)
+
+    def split_sample_map(self, ratios, split_names=None):
+        """
+        Given sample_ids, populations and the amount of data to be put into each set,
+        Split it such that all sets get even distribution of sample_ids for each population.
+        """
+
+        assert sum(ratios) == 1, "ratios must sum to 1"
+
+        split_names = ["set_" + str(i) for i in range(len(ratios))] if split_names is None else split_names
+
+        set_ids = [[] for _ in ratios]
+
+        for p in np.unique(self.sample_map_data["population"]):
+
+            # subselect population
+            pop_idx = self.sample_map_data["population"] == p
+            pop_sample_ids = list(np.copy(self.sample_map_data["sample"][pop_idx]))
+            n_pop = len(pop_sample_ids)
+
+            # find number of samples in each set
+            n_sets = [int(round(r * n_pop)) for r in ratios]
+            while sum(n_sets) > n_pop:
+                n_sets[0] -= 1
+            while sum(n_sets) < n_pop:
+                n_sets[-1] += 1
+
+            # divide the samples accordingly
+            for s, r in enumerate(ratios):
+                n_set = n_sets[s]
+                set_ids_idx = np.random.choice(len(pop_sample_ids), n_set, replace=False)
+                set_ids[s] += [[pop_sample_ids.pop(idx), p, split_names[s]] for idx in
+                               sorted(set_ids_idx, reverse=True)]
+
+        split_df = pd.DataFrame(np.concatenate(set_ids), columns=["sample", "population", "split"])
+        return split_df
+
+    def include_all(self, from_split, in_split):
+        from_split_data = self.sample_map_data[self.sample_map_data["split"] == from_split]
+        from_pop = np.unique(from_split_data["population"])
+        ave_pop_size = np.round(len(from_split_data) / len(from_pop))
+
+        in_split_data = self.sample_map_data[self.sample_map_data["split"] == in_split]
+        in_pop = np.unique(in_split_data["population"])
+
+        missing_pops = [p for p in from_pop if p not in in_pop]
+
+        if len(missing_pops) > 0:
+            print("WARNING: Small sample size from populations: {}".format(np.array(missing_pops)))
+            print("... Proceeding by including duplicates in both base- and smoother data...")
+            for p in missing_pops:
+                # add some amount of founders to in_pop
+                from_founders = from_split_data[from_split_data["population"] == p].copy()
+                n_copies = min(ave_pop_size, len(from_founders))
+                copies = from_founders.sample(n_copies)
+                copies["split"] = [in_split] * n_copies
+                self.sample_map_data = self.sample_map_data.append(copies)
+
+    def return_split(self, split):
+        if split in self.splits:
+            return self.sample_map_data[self.sample_map_data["split"] == split]
+        else:
+            raise Exception("split does not exist!!!")
+
+    def metadata(self):
+        metadict = {
+            "num_snps": self.num_snps,
+            "pos_snps": self.pos_snps,
+            "ref_snps": self.ref_snps,
+            "alt_snps": self.alt_snps,
+            "pop_to_num": self.pop_to_num,
+            "num_to_pop": self.num_to_pop
+        }
+        return metadict

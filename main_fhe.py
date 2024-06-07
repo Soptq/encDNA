@@ -6,7 +6,7 @@ from sklearn.metrics import confusion_matrix
 from concrete.ml.sklearn import XGBClassifier, LogisticRegression
 
 from config import *
-from preprocessing import get_data
+from preprocessing import get_data, get_data_v2
 
 from concrete.fhe import Configuration
 
@@ -54,7 +54,7 @@ def slide_window(B, S, y=None):
 if __name__ == '__main__':
     print("Training with FHE")
     print("Getting data...")
-    data, meta = get_data()
+    data, meta = get_data_v2()
     (X_t1, y_t1), (X_t2, y_t2), (X_v, y_v) = data
     print(X_t1.shape, y_t1.shape, X_t2.shape, y_t2.shape, X_v.shape, y_v.shape)
 
@@ -71,6 +71,7 @@ if __name__ == '__main__':
         n_jobs=N_JOBS, random_state=SEED,
         use_label_encoder=False, objective='multi:softprob',
     )
+    print("Concrete does not support `n_jobs` in `XGBClassifier` yet, the training might be slow")
 
     def train_base_models(models, X_t, y_t):
         if context != 0.:

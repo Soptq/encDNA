@@ -1,3 +1,23 @@
+## Update (2024-06)
+The code is updated to allow evaluations on the dataset provided by https://github.com/alephzerox/ancestry-fhe.
+
+You can simply download the dataset from [here](https://drive.google.com/drive/folders/1lN6AR6wpGi6NhTptFkP1I3GmUEyhEw7J), placing downloaded files in the `data` directory and prepare the dataset using `python preprocessing.py`
+
+Performance on M1 MAX:
+
+```bash
+Summary
+    Number of samples: 100
+
+    Performance
+        Clear:  0.31 s/sample
+        FHE:    260.1544 s/sample
+        
+    Accuracy
+        Clear:  65.66 %
+        FHE:    64.25 %
+```
+
 ## Installation
 
 1. Download the query file from [here](https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502/ALL.chr22.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf.gz). After downloading, place the `vcf.gz` file in the `data` directory.

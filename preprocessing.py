@@ -7,7 +7,7 @@ from scipy import stats
 
 from config import *
 from utils import save_dict, read_genetic_map, load_dict
-from lai_dataset import LAIDataset
+from datasets import LAIDataset, AncestryDataset
 
 
 def build_dataset():
@@ -63,6 +63,19 @@ def preprocess():
     print("Running in command line: \n\t", subset_cmd)
     os.system(subset_cmd)
     build_dataset()
+
+
+def build_dataset_v2():
+    sample_map_path = os.path.join(DATA_FOLDER, "sample_maps")
+    if not os.path.exists(sample_map_path):
+        os.makedirs(sample_map_path)
+
+    reference_panel = AncestryDataset(REFERENCE_PANEL_SAMPLES, REFERENCE_PANEL_MAPPING, R_ADMIXED, BUILD_SPLIT, BUILD_GENS, TEST_SAMPLES, TEST_MAPPING, DATA_FOLDER)
+    save_dict(reference_panel.metadata(), os.path.join(DATA_FOLDER, "metadata.pkl"))
+
+
+def preprocess_v2():
+    build_dataset_v2()
 
 
 def load_np_data(files):
@@ -174,9 +187,66 @@ def get_data():
     X_t1, y_t1 = read("train1")
     X_t2, y_t2 = read("train2")
     X_v, y_v = read("val")
-    # X_t1, y_t1 = read("train2")
-    # X_t2, y_t2 = read("train2")
-    # X_v, y_v = None, None
+
+    X_t1 = X_t1.astype(np.float32)
+    y_t1 = y_t1.astype(np.int32)
+    X_t2 = X_t2.astype(np.float32)
+    y_t2 = y_t2.astype(np.int32)
+    X_v = X_v.astype(np.float32)
+    y_v = y_v.astype(np.int32)
+
+    data = ((X_t1, y_t1), (X_t2, y_t2), (X_v, y_v))
+
+    return data, meta
+
+
+def get_data_v2():
+    metadata = load_dict(os.path.join(DATA_FOLDER, "metadata.pkl"))
+    snp_pos = metadata["pos_snps"]
+    snp_ref = metadata["ref_snps"]
+    snp_alt = metadata["alt_snps"]
+    pop_order = metadata["num_to_pop"]
+
+    pop_order = {int(k): v for k, v in pop_order.items()}
+
+    pop_list = []
+    for i in range(len(pop_order.keys())):
+        pop_list.append(pop_order[i])
+    pop_order = np.array(pop_list)
+
+    A = len(pop_order)
+    C = len(snp_pos)
+    M = 2048
+    if C % M == 0:
+        M -= 1
+
+    meta = {
+        "A": A,  # number of ancestry
+        "C": C,  # chm length
+        "M": M,  # window size in SNPs
+        "snp_pos": snp_pos,
+        "snp_ref": snp_ref,
+        "snp_alt": snp_alt,
+        "pop_order": pop_order
+    }
+
+    def read(split):
+        if split == "val":
+            sample_file_path = os.path.join(DATA_FOLDER, split, "gen_0/mat_vcf_2d.npy")
+            mapping_file_path = os.path.join(DATA_FOLDER, split, "gen_0/mat_map.npy")
+            X_raw = load_np_data([sample_file_path])
+            labels_raw = load_np_data([mapping_file_path])
+        else:
+            paths = [os.path.join(DATA_FOLDER, split, "gen_" + str(gen)) for gen in BUILD_GENS]
+            X_files = [p + "/mat_vcf_2d.npy" for p in paths]
+            labels_files = [p + "/mat_map.npy" for p in paths]
+            X_raw, labels_raw = [load_np_data(f) for f in [X_files, labels_files]]
+        X, y = data_process(X_raw, labels_raw, M)
+        return X, y
+
+    X_t1, y_t1 = read("train1")
+    X_t2, y_t2 = read("train2")
+    X_v, y_v = read("val")
 
     X_t1 = X_t1.astype(np.float32)
     y_t1 = y_t1.astype(np.int32)
@@ -191,4 +261,5 @@ def get_data():
 
 
 if __name__ == '__main__':
-    preprocess()
+    # preprocess()
+    preprocess_v2()
