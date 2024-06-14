@@ -27,8 +27,6 @@ def preprocess():
 
     pos_snps = reference_vcf_file["variants/POS"]
     num_snps = call_data.shape[0]
-    ref_snps = reference_vcf_file["variants/REF"].copy().astype(str)
-    alt_snps = reference_vcf_file["variants/ALT"][:, 0].copy().astype(str)
 
     print("Getting sample map info...")
     reference_mapping = pd.read_csv(REFERENCE_PANEL_MAPPING, dtype="object")
