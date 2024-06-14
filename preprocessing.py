@@ -1,4 +1,6 @@
+import copy
 import os
+import random
 
 import pandas as pd
 import numpy as np
@@ -6,260 +8,196 @@ import numpy as np
 from scipy import stats
 
 from config import *
-from utils import save_dict, read_genetic_map, load_dict
-from datasets import LAIDataset, AncestryDataset
 
-
-def build_dataset():
-    lai_dataset = LAIDataset(CHM, REFERENCE_FILE, GENETIC_MAP_FILE, seed=SEED)
-    lai_dataset.build_dataset(SAMPLE_MAP_FILE)
-
-    sample_map_path = os.path.join(DATA_FOLDER, "sample_maps")
-    if not os.path.exists(sample_map_path):
-        os.makedirs(sample_map_path)
-
-    # split sample map and write it.
-    lai_dataset.create_splits(BUILD_SPLIT, sample_map_path)
-
-    # write metadata into data_path/metadata.yaml
-    save_dict(lai_dataset.metadata(), os.path.join(DATA_FOLDER, "metadata.pkl"))
-    # Save genetic map df and store it inside model later after training
-    gen_map_df = read_genetic_map(GENETIC_MAP_FILE, CHM)
-    save_dict(gen_map_df, os.path.join(DATA_FOLDER, "gen_map_df.pkl"))
-
-    # get num_outs
-    num_outs = {}
-    min_splits = {"train1": 800, "train2": 150, "val": 50}
-    for split in BUILD_SPLIT:
-        total_sim = max(len(lai_dataset.return_split(split)) * R_ADMIXED, min_splits[split])
-        num_outs[split] = int(total_sim / len(BUILD_GENS))
-
-    print("Running Simulation...")
-    for split in BUILD_SPLIT:
-        split_path = os.path.join(DATA_FOLDER, split)
-        if not os.path.exists(split_path):
-            os.makedirs(split_path)
-        for gen in BUILD_GENS:
-            lai_dataset.simulate(num_outs[split],
-                                 split=split,
-                                 gen=gen,
-                                 outdir=os.path.join(split_path, "gen_" + str(gen)),
-                                 return_out=False)
-
-    return
+from utils import read_vcf
+import pickle
+import gzip
 
 
 def preprocess():
-    """
-    Preprocess the data to get the reference file from the provided query file.
+    print("Reading VCF file...")
+    reference_vcf_file = read_vcf(REFERENCE_PANEL_SAMPLES)
+    test_vcf_file = read_vcf(TEST_SAMPLES)
 
-    This step is a part of the data preprocessing pipeline, so it is done in a clear way, without FHE.
-    :return:
-    """
-    sample_map = pd.read_csv(SAMPLE_MAP_FILE, sep="\t")
-    samples = list(sample_map["#Sample"])
-    np.savetxt("data/samples_1000g.tsv", samples, delimiter="\t", fmt="%s")
-    subset_cmd = "bcftools view" + " -S data/samples_1000g.tsv -o " + REFERENCE_FILE + " " + QUERY_FILE
-    print("Running in command line: \n\t", subset_cmd)
-    os.system(subset_cmd)
-    build_dataset()
+    call_data = reference_vcf_file["calldata/GT"]
+    vcf_samples = reference_vcf_file["samples"]
+
+    test_call_data = test_vcf_file["calldata/GT"]
+    test_vcf_samples = test_vcf_file["samples"]
+
+    pos_snps = reference_vcf_file["variants/POS"]
+    num_snps = call_data.shape[0]
+    ref_snps = reference_vcf_file["variants/REF"].copy().astype(str)
+    alt_snps = reference_vcf_file["variants/ALT"][:, 0].copy().astype(str)
+
+    print("Getting sample map info...")
+    reference_mapping = pd.read_csv(REFERENCE_PANEL_MAPPING, dtype="object")
+    reference_mapping.columns = ["sample", "population", "population_code"]
+    pop_to_num = {}
+    for i, pop in enumerate(reference_mapping["population"]):
+        pop_to_num[pop] = reference_mapping["population_code"][i]
+    reference_mapping["population_code"] = reference_mapping["population"].apply(pop_to_num.get)
+    num_to_pop = {v: k for k, v in pop_to_num.items()}
+
+    pop_order = {int(k): v for k, v in num_to_pop.items()}
+    pop_list = []
+    for i in range(len(pop_order.keys())):
+        pop_list.append(pop_order[i])
+    pop_order = np.array(pop_list)
+    A = len(pop_order)
+    C = len(pos_snps)
+
+    metadata = {
+        "A": A,
+        "C": C,
+    }
+    with open(os.path.join(DATA_FOLDER, "metadata.pkl"), 'wb') as handle:
+        pickle.dump(metadata, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    with gzip.open(TEST_MAPPING, "rb") as mapping_file:
+        mappings = pickle.load(mapping_file)
+    test_sample_map = {}
+    for name, anc_1, anc_2 in mappings:
+        test_sample_map[name] = [anc_1, anc_2]
+
+    print("Reading founders...")
+    founders = {}
+    for i in reference_mapping.iterrows():
+        sample_name = i[1]["sample"]
+        index = vcf_samples.tolist().index(sample_name)
+
+        snp_1 = call_data[:, index, 0].astype(int)
+        snp_2 = call_data[:, index, 1].astype(int)
+        label = i[1]["population_code"]
+
+        if label not in founders:
+            founders[label] = [(snp_1, snp_2, label)]
+        else:
+            founders[label].append((snp_1, snp_2, label))
+
+    splitted_founders = {k: [] for k in BUILD_SPLIT.keys()}
+    for l, f in founders.items():
+        n_founders = len(f)
+        f_idx = np.arange(n_founders)
+        np.random.shuffle(f_idx)
+        build_split = np.array(list(BUILD_SPLIT.values())) * n_founders
+        cumsum_split = np.cumsum(build_split).astype(int)
+        splitted = np.split(f_idx, cumsum_split.tolist())
+        for i, k in enumerate(BUILD_SPLIT.keys()):
+            split_idx = splitted[i]
+            for _idx in split_idx:
+                snp_1, snp_2, label = f[_idx]
+                label_1 = label_2 = np.array([label] * num_snps, dtype=int)
+                splitted_founders[k].append((snp_1, snp_2, label_1, label_2))
+
+    test_founders = []
+    test_samples = test_call_data.transpose(1, 2, 0)
+    for i in range(len(test_samples)):
+        snp_1 = test_samples[i, 0, :].astype(int)
+        snp_2 = test_samples[i, 1, :].astype(int)
+        label_1 = test_sample_map[test_vcf_samples[i]][0].astype(int)
+        label_2 = test_sample_map[test_vcf_samples[i]][1].astype(int)
+        test_founders.append([snp_1, snp_2, label_1, label_2])
+    np.save(os.path.join(DATA_FOLDER, f"test.npy"), test_founders)
+
+    print("Simulating...")
+    num_sims = {k: int(NUM_SPLIT[k] / len(BUILD_GENS)) for k in BUILD_SPLIT.keys()}
+    for splitted_key in BUILD_SPLIT.keys():
+        admix = []
+        for gen in BUILD_GENS:
+            print(f"Simulating for {splitted_key}-gen{gen}")
+            if gen == 0:
+                continue
+            for i in range(num_sims[splitted_key]):
+                admix.append([None, None, None, None])
+                for j in range(2):
+                    founder_id = np.random.choice(len(splitted_founders[splitted_key]))
+                    snp_1, snp_2, label_1, label_2 = copy.deepcopy(splitted_founders[splitted_key][founder_id])
+                    snp, label = (snp_1, label_1) if random.random() < 0.5 else (snp_2, label_2)
+                    breakpoints = np.random.choice(range(1, num_snps), size=int(sum(np.random.poisson(0.75, size=gen))) + 1, replace=False)
+                    breakpoints = np.concatenate(([0], np.sort(breakpoints), [num_snps]))
+                    for i in range(len(breakpoints) - 1):
+                        _founder_id = np.random.choice(len(splitted_founders[splitted_key]))
+                        _snp_1, _snp_2, _label_1, _label_2 = copy.deepcopy(splitted_founders[splitted_key][_founder_id])
+                        _snp, _label = (_snp_1, _label_1) if random.random() < 0.5 else (_snp_2, _label_2)
+                        print(
+                            f"Founders: {founder_id}:{label} -> {_founder_id}:{_label}, {breakpoints[i]}:{breakpoints[i + 1]}")
+                        snp[breakpoints[i]:breakpoints[i + 1]] = _snp[breakpoints[i]:breakpoints[i + 1]].copy()
+                        label[breakpoints[i]:breakpoints[i + 1]] = _label[breakpoints[i]:breakpoints[i + 1]].copy()
+                    admix[-1][j], admix[-1][j + 2] = snp, label
+        for v in splitted_founders[splitted_key]:
+            admix.append(v)
+        np.save(os.path.join(DATA_FOLDER, f"{splitted_key}.npy"), admix)
 
 
-def build_dataset_v2():
-    sample_map_path = os.path.join(DATA_FOLDER, "sample_maps")
-    if not os.path.exists(sample_map_path):
-        os.makedirs(sample_map_path)
+def slide_window(data, smooth_win_size, y=None):
+    N, W, A = data.shape
 
-    reference_panel = AncestryDataset(REFERENCE_PANEL_SAMPLES, REFERENCE_PANEL_MAPPING, R_ADMIXED, BUILD_SPLIT, BUILD_GENS, TEST_SAMPLES, TEST_MAPPING, DATA_FOLDER)
-    save_dict(reference_panel.metadata(), os.path.join(DATA_FOLDER, "metadata.pkl"))
+    pad = (smooth_win_size + 1) // 2
+    data_padded = np.pad(data, ((0, 0), (pad, pad), (0, 0)), mode='reflect')
+    X_slide = np.lib.stride_tricks.sliding_window_view(data_padded, (1, smooth_win_size, A))
+    X_slide = X_slide[:, :W, :].reshape(N * W, -1)
+    y_slide = None if y is None else y.reshape(N * W)
 
-
-def preprocess_v2():
-    build_dataset_v2()
-
-
-def load_np_data(files):
-    data = []
-    for f in files:
-        data.append(np.load(f).astype(np.int16))
-    data = np.concatenate(data, axis=0)
-    return data
-
-
-def dropout_row(data, missing_percent):
-    num_drops = int(len(data) * missing_percent)
-    drop_indices = np.random.choice(np.arange(len(data)), size=num_drops, replace=False)
-    data[drop_indices] = 2
-    return data
-
-
-def simulate_missing_values(data, missing_percent=0.0):
-    if missing_percent == 0:
-        return data
-    return np.apply_along_axis(dropout_row, axis=1, arr=data, missing_percent=missing_percent)
-
-
-def window_reshape(data, win_size):
-    """
-    Takes in data of shape (N, chm_len), aggregates labels and
-    returns window shaped data of shape (N, chm_len//window_size)
-    """
-
-    # Split in windows and make the last one contain the remainder
-    chm_len = data.shape[1]
-    drop_last_idx = chm_len // win_size * win_size - win_size
-    window_data = data[:, 0:drop_last_idx]
-    rem = data[:, drop_last_idx:]
-
-    # reshape accordingly
-    N, C = window_data.shape
-    num_winds = C // win_size
-    window_data = window_data.reshape(N, num_winds, win_size)
-
-    # attach thet remainder
-    window_data = stats.mode(window_data, axis=2)[0].squeeze()
-    rem_label = stats.mode(rem, axis=1)[0].squeeze()
-    window_data = np.concatenate((window_data, rem_label[:, np.newaxis]), axis=1)
-
-    return window_data
-
-
-def data_process(X, labels, window_size, missing=0.0):
-    """
-    Takes in 2 numpy arrays:
-        - X is of shape (N, chm_len)
-        - labels is of shape (N, chm_len)
-
-    And returns 2 processed numpy arrays:
-        - X is of shape (N, chm_len)
-        - labels is of shape (N, chm_len//window_size)
-    """
-
-    # Reshape labels into windows
-    y = window_reshape(labels, window_size)
-
-    # simulates lacking of input
-    if missing != 0:
-        print("Simulating missing values...")
-        X = simulate_missing_values(X, missing)
-
-    X = np.array(X, dtype="int8")
-    y = np.array(y, dtype="int16")
-
-    return X, y
+    return X_slide, y_slide
 
 
 def get_data():
-    metadata = load_dict(os.path.join(DATA_FOLDER, "metadata.pkl"))
-    snp_pos = metadata["pos_snps"]
-    snp_ref = metadata["ref_snps"]
-    snp_alt = metadata["alt_snps"]
-    pop_order = metadata["num_to_pop"]
-    pop_list = []
-    for i in range(len(pop_order.keys())):
-        pop_list.append(pop_order[i])
-    pop_order = np.array(pop_list)
-
-    A = len(pop_order)
-    C = len(snp_pos)
-    M = int(round(WINDOW_SIZE_CM * (C / (100 * metadata["morgans"]))))
-    if C % M == 0:
-        M -= 1
-
-    meta = {
-        "A": A,  # number of ancestry
-        "C": C,  # chm length
-        "M": M,  # window size in SNPs
-        "snp_pos": snp_pos,
-        "snp_ref": snp_ref,
-        "snp_alt": snp_alt,
-        "pop_order": pop_order
-    }
-
-    def read(split):
-        paths = [os.path.join(DATA_FOLDER, split, "gen_" + str(gen)) for gen in BUILD_GENS]
-        X_files = [p + "/mat_vcf_2d.npy" for p in paths]
-        labels_files = [p + "/mat_map.npy" for p in paths]
-        X_raw, labels_raw = [load_np_data(f) for f in [X_files, labels_files]]
-        X, y = data_process(X_raw, labels_raw, M)
-        return X, y
-
-    X_t1, y_t1 = read("train1")
-    X_t2, y_t2 = read("train2")
-    X_v, y_v = read("val")
-
-    X_t1 = X_t1.astype(np.float32)
-    y_t1 = y_t1.astype(np.int32)
-    X_t2 = X_t2.astype(np.float32)
-    y_t2 = y_t2.astype(np.int32)
-    X_v = X_v.astype(np.float32)
-    y_v = y_v.astype(np.int32)
-
-    data = ((X_t1, y_t1), (X_t2, y_t2), (X_v, y_v))
-
-    return data, meta
-
-
-def get_data_v2():
-    metadata = load_dict(os.path.join(DATA_FOLDER, "metadata.pkl"))
-    snp_pos = metadata["pos_snps"]
-    snp_ref = metadata["ref_snps"]
-    snp_alt = metadata["alt_snps"]
-    pop_order = metadata["num_to_pop"]
-
-    pop_order = {int(k): v for k, v in pop_order.items()}
-
-    pop_list = []
-    for i in range(len(pop_order.keys())):
-        pop_list.append(pop_order[i])
-    pop_order = np.array(pop_list)
-
-    A = len(pop_order)
-    C = len(snp_pos)
+    with open(os.path.join(DATA_FOLDER, "metadata.pkl"), 'rb') as f:
+        meta = pickle.load(f)
     M = 2048
-    if C % M == 0:
-        M -= 1
-
-    meta = {
-        "A": A,  # number of ancestry
-        "C": C,  # chm length
-        "M": M,  # window size in SNPs
-        "snp_pos": snp_pos,
-        "snp_ref": snp_ref,
-        "snp_alt": snp_alt,
-        "pop_order": pop_order
-    }
+    M = M if meta["C"] % M == 0 else M - 1
+    meta["M"] = M
 
     def read(split):
-        if split == "val":
-            sample_file_path = os.path.join(DATA_FOLDER, split, "gen_0/mat_vcf_2d.npy")
-            mapping_file_path = os.path.join(DATA_FOLDER, split, "gen_0/mat_map.npy")
-            X_raw = load_np_data([sample_file_path])
-            labels_raw = load_np_data([mapping_file_path])
-        else:
-            paths = [os.path.join(DATA_FOLDER, split, "gen_" + str(gen)) for gen in BUILD_GENS]
-            X_files = [p + "/mat_vcf_2d.npy" for p in paths]
-            labels_files = [p + "/mat_map.npy" for p in paths]
-            X_raw, labels_raw = [load_np_data(f) for f in [X_files, labels_files]]
-        X, y = data_process(X_raw, labels_raw, M)
+        file_path = os.path.join(DATA_FOLDER, split + ".npy")
+        with open(file_path, 'rb') as f:
+            data = np.load(f, allow_pickle=True)
+        np.random.shuffle(data)
+        X, y = [], []
+        for d in data:
+            snp_1, snp_2, label_1, label_2 = d
+            X.append(snp_1)
+            X.append(snp_2)
+            y.append(label_1)
+            y.append(label_2)
+
+        X = np.array(X)
+        y = np.array(y)
+
+        N, L = y.shape
+        y = y[:, 0:L // M * M].reshape(N, L // M, M)
+        y = stats.mode(y, axis=2)[0].squeeze()
+
+        y = np.swapaxes(y, 0, 1)
+        n_classes = len(np.unique(y))
+        for i in range(len(y)):
+            if np.unique(y[i]).shape[0] != n_classes:
+                missed_classes = np.setdiff1d(np.arange(n_classes), y[i])
+                for missed_class in missed_classes:
+                    random_idx = np.random.choice(y.shape[1], 2)
+                    y[i, random_idx] = missed_class
+        for i in range(len(y)):
+            assert np.unique(y[i]).shape[0] == n_classes
+        y = np.swapaxes(y, 0, 1)
+
         return X, y
 
     X_t1, y_t1 = read("train1")
     X_t2, y_t2 = read("train2")
-    X_v, y_v = read("val")
+    X_t, y_t = read("test")
 
     X_t1 = X_t1.astype(np.float32)
     y_t1 = y_t1.astype(np.int32)
     X_t2 = X_t2.astype(np.float32)
     y_t2 = y_t2.astype(np.int32)
-    X_v = X_v.astype(np.float32)
-    y_v = y_v.astype(np.int32)
+    X_t = X_t.astype(np.float32)
+    y_t = y_t.astype(np.int32)
 
-    data = ((X_t1, y_t1), (X_t2, y_t2), (X_v, y_v))
+    data = ((X_t1, y_t1), (X_t2, y_t2), (X_t, y_t))
 
     return data, meta
 
 
 if __name__ == '__main__':
-    # preprocess()
-    preprocess_v2()
+    preprocess()

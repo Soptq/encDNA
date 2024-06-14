@@ -18,6 +18,10 @@ BUILD_SPLIT = {
     "train1": 0.8,
     "train2": 0.2,
 }
+NUM_SPLIT = {
+    "train1": 2400,
+    "train2": 600,
+}
 # which generation to simulate, not critical some accuracy can be squeezed if it better represents the query data
 BUILD_GENS = [0, 2, 4, 6, 8, 12, 16, 24, 32, 48]
 # we simulate r_admixed*n_founders amount of admixed individuals

@@ -6,7 +6,7 @@ from sklearn.metrics import confusion_matrix
 from concrete.ml.sklearn import XGBClassifier, LogisticRegression
 
 from config import *
-from preprocessing import get_data, get_data_v2
+from preprocessing import get_data, slide_window
 
 from concrete.fhe import Configuration
 
@@ -23,38 +23,10 @@ debug_config = Configuration(
 )
 
 
-def slide_window(B, S, y=None):
-    """
-    inputs
-        - B (np.array: base probabilities of shape (N,W,A)
-        - S (int): smoother window size
-
-    """
-    N, W, A = B.shape
-
-    # pad it.
-    pad = (S + 1) // 2
-    pad_left = np.flip(B[:, 0:pad, :], axis=1)
-    pad_right = np.flip(B[:, -pad:, :], axis=1)
-    B_padded = np.concatenate([pad_left, B, pad_right], axis=1)
-
-    # window it.
-    X_slide = np.zeros((N, W, A * S), dtype="float32")
-    for ppl, dat in enumerate(B_padded):
-        for w in range(W):
-            X_slide[ppl, w, :] = dat[w:w + S].ravel()
-
-    # reshape
-    X_slide = X_slide.reshape(N * W, A * S)
-    y_slide = None if y is None else y.reshape(N * W)
-
-    return X_slide, y_slide
-
-
 if __name__ == '__main__':
     print("Training with FHE")
     print("Getting data...")
-    data, meta = get_data_v2()
+    data, meta = get_data()
     (X_t1, y_t1), (X_t2, y_t2), (X_v, y_v) = data
     print(X_t1.shape, y_t1.shape, X_t2.shape, y_t2.shape, X_v.shape, y_v.shape)
 
