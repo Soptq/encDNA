@@ -9,13 +9,13 @@ Performance on M1 MAX:
 Summary
     Number of samples: 100
 
-    Performance
+    Performance (Inference)
         Clear:  0.31 s/sample
-        FHE:    260.1544 s/sample
+        FHE:    293.79 s/sample
         
-    Accuracy
-        Clear:  65.66 %
-        FHE:    64.25 %
+    Accuracy (Inference)
+        Clear:  76.42 %
+        FHE:    76.18 %
 ```
 
 ## Installation

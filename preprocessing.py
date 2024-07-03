@@ -147,11 +147,12 @@ def get_data():
     M = M if meta["C"] % M == 0 else M - 1
     meta["M"] = M
 
-    def read(split):
+    def read(split, shuffle=True):
         file_path = os.path.join(DATA_FOLDER, split + ".npy")
         with open(file_path, 'rb') as f:
             data = np.load(f, allow_pickle=True)
-        np.random.shuffle(data)
+        if shuffle:
+            np.random.shuffle(data)
         X, y = [], []
         for d in data:
             snp_1, snp_2, label_1, label_2 = d
@@ -183,7 +184,7 @@ def get_data():
 
     X_t1, y_t1 = read("train1")
     X_t2, y_t2 = read("train2")
-    X_t, y_t = read("test")
+    X_t, y_t = read("test", shuffle=False)
 
     X_t1 = X_t1.astype(np.float32)
     y_t1 = y_t1.astype(np.int32)
